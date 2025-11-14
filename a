@@ -1,0 +1,66 @@
+graph TD
+screenbook>画面設計書.xlsx]
+reportbook>帳票設計書.xlsx]
+testbook>結合テスト仕様書.xlsx]
+evidence>エビデンス（前提データ、入力パラメータあり、スクリーンショット）.xlsx]
+dssot{{設計書関連情報.json}}
+tssot{{テストケース情報（値記載なし）.json}}
+tssot2{{テストケース情報（値記載あり）.json}}
+svf([SVF Cloud])
+database[(データベース)]
+pdf>帳票PDF]
+
+prm_dssot_compile[テスト仕様書情報作成]
+prm_bookgen_test[テスト仕様書作成]
+prm_test_automation[自動テストコントロール]
+prm_manul_input[パラメータ入力画面ツール]
+
+web[ウエーブ画面]
+
+subgraph inputs[取込資料]
+    direction LR
+    screenbook
+    reportbook
+end
+
+subgraph test_gen[テスト仕様書作成モジュール]
+    direction LR
+    prm_dssot_compile　--> dssot
+end
+
+subgraph essay_tb[Excel作成モジュール]
+	direction TB
+	prm_bookgen_test --> testbook
+end 
+
+subgraph automation[テスト実施モジュール]
+    direction LR
+    prm_test_automation --> |Seleniumを通じてテストケース情報.jsonよりパラメータ入力| web
+    web --> |スクリーンショット| prm_test_automation
+    web --> |PDFダウンロード| prm_test_automation
+    database -->  |ケースの前提条件のデータを取得、エビデンスに追加| prm_test_automation
+    svf --> |帳票印刷用のCSV取得| prm_test_automation
+end
+
+subgraph register[ケース前提条件入力モジュール]
+    direction LR
+    prm_manul_input
+end
+
+subgraph results[成果物]
+    direction LR
+    x>結合テスト仕様書.xlsx]
+    evidence
+    pdf
+end
+inputs --> test_gen
+test_gen --> tssot
+tssot --> essay_tb
+tssot --> register
+register --> tssot2
+tssot2 --> automation
+essay_tb --> results
+automation --> results
+
+ ```
+
