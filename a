@@ -1,66 +1,285 @@
-graph TD
-screenbook>画面設計書.xlsx]
-reportbook>帳票設計書.xlsx]
-testbook>結合テスト仕様書.xlsx]
-evidence>エビデンス（前提データ、入力パラメータあり、スクリーンショット）.xlsx]
-dssot{{設計書関連情報.json}}
-tssot{{テストケース情報（値記載なし）.json}}
-tssot2{{テストケース情報（値記載あり）.json}}
-svf([SVF Cloud])
-database[(データベース)]
-pdf>帳票PDF]
+#!/usr/bin/env python3
 
-prm_dssot_compile[テスト仕様書情報作成]
-prm_bookgen_test[テスト仕様書作成]
-prm_test_automation[自動テストコントロール]
-prm_manul_input[パラメータ入力画面ツール]
+import os
+import json
+import base64
+import hashlib
+import hmac
+from pathlib import Path
+from datetime import datetime
+from typing import List, Dict, Tuple, Optional
 
-web[ウエーブ画面]
 
-subgraph inputs[取込資料]
-    direction LR
-    screenbook
-    reportbook
-end
+class SimpleDecryptor:
 
-subgraph test_gen[テスト仕様書作成モジュール]
-    direction LR
-    prm_dssot_compile　--> dssot
-end
+    
+    FILE_START_MARKER = "<<<FILE_START>>>"
+    FILE_END_MARKER = "<<<FILE_END>>>"
+    METADATA_START = "<<<METADATA_START>>>"
+    METADATA_END = "<<<METADATA_END>>>"
+    ENCRYPTED_MARKER = "<<<ENCRYPTED_CONTENT>>>"
+    
+    def __init__(self, password: str):
+        self.password = password
+        
+    def _derive_key(self, salt: bytes, iterations: int = 100000) -> bytes:
+        password_bytes = self.password.encode('utf-8')
+        key = hashlib.pbkdf2_hmac('sha256', password_bytes, salt, iterations)
+        return key
+    
+    def _xor_encrypt_decrypt(self, data: bytes, key: bytes) -> bytes:
+        key_len = len(key)
+        return bytes([data[i] ^ key[i % key_len] for i in range(len(data))])
+    
+    def _decrypt_data(self, encrypted_str: str) -> Tuple[Optional[str], bool]:
 
-subgraph essay_tb[Excel作成モジュール]
-	direction TB
-	prm_bookgen_test --> testbook
-end 
+        try:
+            combined = base64.b64decode(encrypted_str.encode('ascii'))
+            
+            
+            salt = combined[:16]
+            mac = combined[16:48]
+            encrypted = combined[48:]
+            
+            
+            key = self._derive_key(salt)
+            
+            
+            expected_mac = hmac.new(key, encrypted, hashlib.sha256).digest()
+            if not hmac.compare_digest(mac, expected_mac):
+                return None, False
+            
+            
+            decrypted_bytes = self._xor_encrypt_decrypt(encrypted, key)
+            decrypted_str = decrypted_bytes.decode('utf-8')
+            
+            return decrypted_str, True
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            return None, False
+    
+    def _read_encrypted_file(self, file_path: Path) -> str:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        
+        encrypted_lines = []
+        in_content = False
+        
+        for line in lines:
+            line = line.rstrip('\n')
+            if line == self.ENCRYPTED_MARKER:
+                in_content = True
+                continue
+            if in_content and not line.startswith('#'):
+                encrypted_lines.append(line)
+        
+        return ''.join(encrypted_lines)
+    
+    def _extract_metadata(self, content: str) -> Optional[Dict]:
+        try:
+            start_idx = content.find(self.METADATA_START)
+            end_idx = content.find(self.METADATA_END)
+            
+            if start_idx == -1 or end_idx == -1:
+                return None
+            
+            metadata_str = content[start_idx + len(self.METADATA_START):end_idx].strip()
+            return json.loads(metadata_str)
+            
+        except Exception as e:
+            print(f"⚠️ : {e}")
+            return None
+    
+    def _check_expiration(self, metadata: Dict) -> bool:
+        try:
+            expire_str = metadata.get('expire_at')
+            if not expire_str:
+                return True
+            
+            expire_date = datetime.fromisoformat(expire_str)
+            now = datetime.now()
+            
+            if now > expire_date:
+                return False
+            
+            remaining = expire_date - now
+            return True
+            
+        except Exception as e:
+            return False
+    
+    def _parse_files(self, content: str) -> List[Tuple[str, str, str]]:
 
-subgraph automation[テスト実施モジュール]
-    direction LR
-    prm_test_automation --> |Seleniumを通じてテストケース情報.jsonよりパラメータ入力| web
-    web --> |スクリーンショット| prm_test_automation
-    web --> |PDFダウンロード| prm_test_automation
-    database -->  |ケースの前提条件のデータを取得、エビデンスに追加| prm_test_automation
-    svf --> |帳票印刷用のCSV取得| prm_test_automation
-end
+        files = []
+        lines = content.split('\n')
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            
+            if line == self.FILE_START_MARKER:
+                
+                i += 1
+                path = None
+                ext = None
+                
+                while i < len(lines) and lines[i] != "---CONTENT---":
+                    if lines[i].startswith("PATH: "):
+                        path = lines[i][6:]
+                    elif lines[i].startswith("EXT: "):
+                        ext = lines[i][5:]
+                    i += 1
+                
+                
+                i += 1  
+                content_lines = []
+                
+                while i < len(lines) and lines[i] != self.FILE_END_MARKER:
+                    content_lines.append(lines[i])
+                    i += 1
+                
+                if path and ext:
+                    file_content = '\n'.join(content_lines)
+                    files.append((path, ext, file_content))
 
-subgraph register[ケース前提条件入力モジュール]
-    direction LR
-    prm_manul_input
-end
+            i += 1
+        
+        return files
+    
+    def _restore_files(self, files: List[Tuple[str, str, str]], output_dir: Path, root_name: str):
+        
+        root_dir = output_dir / root_name
+        root_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"\n📁 : {root_dir}")
+        
+        for relative_path, ext, content in files:
+            file_path = root_dir / relative_path
+            
+            
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                print(f"✓ : {relative_path}")
+            except Exception as e:
+                print(f"⚠️  : {relative_path} - {e}")
+    
+    def decrypt_and_unpack(self, encrypted_dir: str, output_dir: str) -> bool:
 
-subgraph results[成果物]
-    direction LR
-    x>結合テスト仕様書.xlsx]
-    evidence
-    pdf
-end
-inputs --> test_gen
-test_gen --> tssot
-tssot --> essay_tb
-tssot --> register
-register --> tssot2
-tssot2 --> automation
-essay_tb --> results
-automation --> results
+        encrypted_path = Path(encrypted_dir).resolve()
+        output_path = Path(output_dir).resolve()
+        
+        if not encrypted_path.exists():
+            raise FileNotFoundError(f": {encrypted_dir}")
+        
+        encrypted_files = sorted(encrypted_path.glob("med_*.txt"))
+        
+        if not encrypted_files:
+            print("❌ ")
+            return False
+        
+        print(f"\n📄  {len(encrypted_files)} ")
+        
+        all_content = []
+        
+        for idx, file_path in enumerate(encrypted_files, 1):
+            print(f"\n🔓  {idx}/{len(encrypted_files)}: {file_path.name}")
+            
+            encrypted_content = self._read_encrypted_file(file_path)
+            
+            decrypted_content, is_valid = self._decrypt_data(encrypted_content)
+            
+            if not is_valid or decrypted_content is None:
+                print(f"❌ ")
+                return False
+            
+            all_content.append(decrypted_content)
+            print(f"✓ ")
+        
+        
+        full_content = '\n'.join(all_content)
+        
+        
+        print("\n📋 ")
+        metadata = self._extract_metadata(full_content)
+        
+        if not metadata:
+            print("❌ ")
+            return False
+        
+        print(f"✓ : {metadata.get('root_name')}")
+        print(f"✓ : {metadata.get('file_count')}")
+        print(f"✓ : {metadata.get('created_at')}")
+        
+        
+        if not self._check_expiration(metadata):
+            return False
+        
+        
+        print("\n📦 ...")
+        files = self._parse_files(full_content)
+        
+        if not files:
+            print("❌ ")
+            return False
+        
+        print(f"✓ : {len(files)} ")
+        
+        
+        print("\n💾 ...")
+        self._restore_files(files, output_path, metadata.get('root_name', 'restored'))
+        
+        print(f"\n✅ !")
+        print(f"📁 : {output_path / metadata.get('root_name', 'restored')}")
+        print(f"📊 : {len(files)} ")
+        
+        return True
 
- ```
 
+def main():
+    import sys
+    
+    print("=" * 80)
+    print("🔓 med v1.0")
+    print("=" * 80)
+    
+    if len(sys.argv) > 1:
+        encrypted_dir = sys.argv[1]
+        output_dir = sys.argv[2] if len(sys.argv) > 2 else "./decrypted_output"
+    else:
+        encrypted_dir = input("\ninput dir: ").strip()
+        output_dir = input("output dir: ").strip()
+        if not output_dir:
+            output_dir = "./decrypted_output"
+    
+    password = input("k: ").strip()
+    if not password:
+        print("❌ !")
+        return
+    
+    try:
+        decryptor = SimpleDecryptor(password)
+        success = decryptor.decrypt_and_unpack(encrypted_dir, output_dir)
+        
+        if success:
+            print("\n" + "=" * 80)
+            print("🎉 !")
+            print("=" * 80)
+        else:
+            print("\n" + "=" * 80)
+            print("❌ ")
+            print("=" * 80)
+        
+    except Exception as e:
+        print(f"\n❌ : {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
